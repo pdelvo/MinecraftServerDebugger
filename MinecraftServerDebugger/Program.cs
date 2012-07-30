@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -19,19 +20,49 @@ namespace MinecraftServerDebugger
         {
             Console.WriteLine("Starting server debugger");
 
-            int port;
-
-            if (args.Length < 1 || !int.TryParse(args[0], out port))
+            if (args.Length < 1)
             {
-                Console.WriteLine("Using: MinecraftServerDebugger.exe [Port]");
+                Console.WriteLine("Minecraft Login Debugger: -debug|-d MinecraftServerDebugger.exe [Port]");
+                Console.WriteLine("Asynchronous key test kit: -encryptionTestKit|-etk [filename]");
                 return;
             }
-
             Console.WriteLine("Generating Rsa Key Pair...");
             _keyPair = ProtocolSecurity.GenerateRSAKeyPair();
             Console.WriteLine("Keypair generated");
+            switch (args[0])
+            {
+                case "-debug":
+                case "-d":
+                    if (args.Length < 2)
+                        Console.WriteLine("Port missing");
+                    else
+                        WaitForClient(int.Parse(args[1]));
+                    break;
+                case "-encryptionTestKit":
+                case "-etk":
+                    string path = args.Length < 2 ? "keys.txt" : args[1];
 
-            WaitForClient(port);
+                    using (TextWriter stream = new StreamWriter(File.Create(path)))
+                    {
+                        stream.WriteLine("Private RSA Key: " + FormatArray(_keyPair.GetPrivate()));
+                        stream.WriteLine("Public RSA Key: " + FormatArray(_keyPair.GetPublic()));
+                        stream.WriteLine("------------------------------------------------------");
+                        byte[] randomBuffer = new byte[4];
+                        new Random().NextBytes(randomBuffer);
+
+                        stream.WriteLine("Demo verification token: " + FormatArray(randomBuffer));
+                        stream.WriteLine("Public key encrypted verification token: " + FormatArray(ProtocolSecurity.RSAEncrypt(randomBuffer, _keyPair.GetPublic(), false)));
+                        using (ConsoleHelpers.ChangeForegroundColor(ConsoleColor.Green))
+                            Console.WriteLine("Finished");
+                    }
+
+                    break;
+                default:
+                    Console.WriteLine("Unknown parameter");
+                    break;
+            }
+            
+
 
             Console.WriteLine("Press Any Key to exit");
             Console.ReadKey(true);
@@ -129,17 +160,41 @@ namespace MinecraftServerDebugger
                     {
                         var encryptionKeyResponse = packet as EncryptionKeyResponse;
                         Console.WriteLine("<Encryption key response packet>");
-                        Console.WriteLine(" Shared Key: " + BitConverter.ToString(encryptionKeyResponse.SharedKey.ToArray()).Replace("-", "").ToLower());
-                        Console.WriteLine(" Verify Token: " + BitConverter.ToString(encryptionKeyResponse.VerifyToken.ToArray()).Replace("-", "").ToLower());
+                        Console.WriteLine(" Shared Key: " + FormatArray(encryptionKeyResponse.SharedKey.ToArray()));
+                        Console.WriteLine(" Verify Token: " + FormatArray(encryptionKeyResponse.VerifyToken.ToArray()));
                         Console.WriteLine("</Encryption key response packet>");
 
                         Console.WriteLine("Decryption Verify Token");
                         var verification = Pdelvo.Minecraft.Network.ProtocolSecurity.RSADecrypt(encryptionKeyResponse.VerifyToken.ToArray(), _keyPair.GetPrivate(), true);
-                        error = error || Test("Received Verify Token: " + BitConverter.ToString(verification).Replace("-", "").ToLower(),
+                        error = error || Test("Received Verify Token: " + FormatArray(verification),
                             verification.Length == randomBuffer.Length
                           && verification.Zip(randomBuffer, (a, b) => a == b).All(a => a), "Verification Token missmatch");
 
 
+                        if (error)
+                        {
+
+                            using (ConsoleHelpers.ChangeForegroundColor(ConsoleColor.Red))
+                            {
+                                Console.WriteLine("Verfiy Token was not encrypted correctly");
+                                if (verification.Length == randomBuffer.Length
+                          && verification.Zip(randomBuffer, (a, b) => a == b).All(a => a))
+                                {
+                                    Console.WriteLine("The provided verify token is the one sended to the server, which is not correct. the token must be encrypted using the rsa public key in the handshake packet.");
+                                }
+                            }
+                            await clientRemoteInterface.SendPacketAsync(new DisconnectPacket { Reason = "Verify Token missmatch" });
+                            client.Close();
+                            continue;
+                        }
+
+                        Console.WriteLine("Decrypting aes key...");
+
+                        byte[] encryptedKey = encryptionKeyResponse.SharedKey.ToArray();
+                        var decrypt = Pdelvo.Minecraft.Network.ProtocolSecurity.RSADecrypt(encryptedKey, _keyPair.GetPrivate(), true);
+
+                        //using(ConsoleHelpers.ChangeForegroundColor(ConsoleColor.Green))
+                        //    Console.WriteLine("Received shared key: " + );
                     }
                     else
                     {
@@ -177,6 +232,11 @@ namespace MinecraftServerDebugger
         static bool Test(string logMessage, Func<bool> func, string errorMessage)
         {
             return Test(logMessage, func(), errorMessage);
+        }
+
+        static string FormatArray(byte[] array)
+        {
+            return BitConverter.ToString(array).Replace("-", "").ToLower();
         }
     }
 
